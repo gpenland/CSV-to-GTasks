@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CSV ↔ Google Tasks</title>
+    <style>
+      :root { --gap: 14px; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; color: #111; }
+      header { padding: 16px; background: #f6f7f8; border-bottom: 1px solid #e7e7e7; }
+      main { padding: 16px; max-width: 980px; margin: 0 auto; }
+      h1 { font-size: 20px; margin: 0 0 6px 0; }
+      .muted { color: #666; }
+      .row { margin: var(--gap) 0; }
+      textarea { width: 100%; min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      select, button { padding: 8px 12px; font: inherit; }
+      button { border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; }
+      button:hover { background: #f4f4f4; }
+      .buttons { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .section { border: 1px solid #eee; border-radius: 12px; padding: 14px; }
+      .ok { color: #087443; }
+      .err { color: #b00020; }
+      details { margin-top: 8px; }
+      summary { cursor: pointer; }
+      code.inline { background: #f4f4f4; padding: 1px 4px; border-radius: 4px; }
+      .grid { display: grid; grid-template-columns: 1fr; gap: var(--gap); }
+      @media (min-width: 800px) {
+        .grid { grid-template-columns: 1fr 1fr; }
+      }
+      .small { font-size: 12px; }
+      .badge { display: inline-block; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; background: #fafafa; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>CSV ↔ Google Tasks</h1>
+      <div class="muted small">Import tasks from CSV or delete tasks using a CSV “undo”.</div>
+    </header>
+    <main>
+      <div class="row">
+        <label for="listSel"><strong>Task list</strong>:</label>
+        <select id="listSel"></select>
+        <span id="listsMsg" class="muted small"></span>
+      </div>
+
+      <div class="grid">
+        <!-- IMPORT -->
+        <section class="section">
+          <div class="row">
+            <div class="badge">Import</div>
+          </div>
+          <p class="muted small">CSV columns: <code class="inline">title, notes, due</code>
+            (<code class="inline">due</code> = <code class="inline">YYYY-MM-DD</code> or RFC3339). First row may be a header.
+          </p>
+          <textarea id="csvImport" placeholder="title,notes,due
+Buy milk,,2025-08-22
+Email Alex,Follow up on proposal,2025-08-23"></textarea>
+
+          <div class="row buttons">
+            <button id="btnImport">Import tasks</button>
+            <span id="importMsg" class="muted"></span>
+          </div>
+        </section>
+
+        <!-- UNDO by CSV -->
+        <section class="section">
+          <div class="row">
+            <div class="badge">Undo by CSV (Delete)</div>
+          </div>
+          <p class="muted small">
+            Paste a CSV describing the tasks to remove. For each row, every matching task in the selected list is deleted.
+            If <code class="inline">notes</code> or <code class="inline">due</code> are omitted/blank, they are ignored for matching.
+          </p>
+          <textarea id="csvUndo" placeholder="title,notes,due
+Buy milk,,
+Email Alex,Follow up on proposal,2025-08-23"></textarea>
+
+          <div class="row buttons">
+            <button id="btnUndo">Delete tasks matching CSV</button>
+            <span id="undoMsg" class="muted"></span>
+          </div>
+          <details class="small">
+            <summary>What gets deleted exactly?</summary>
+            <ul>
+              <li><strong>Title</strong> must match exactly (trimmed).</li>
+              <li>If you include <strong>notes</strong>, they must match exactly. Leave blank to ignore.</li>
+              <li>If you include <strong>due</strong>:
+                <ul>
+                  <li><code>YYYY-MM-DD</code> → compares by date only.</li>
+                  <li>RFC3339 timestamp → must match exactly.</li>
+                </ul>
+              </li>
+              <li>All matching tasks are deleted (not just one).</li>
+            </ul>
+          </details>
+        </section>
+      </div>
+
+      <div class="row section">
+        <div class="buttons">
+          <button id="btnShowFormat">Show CSV format rules</button>
+        </div>
+        <pre id="formatText" class="small"></pre>
+      </div>
+    </main>
+
+    <script>
+      const listSel   = document.getElementById('listSel');
+      const listsMsg  = document.getElementById('listsMsg');
+      const importMsg = document.getElementById('importMsg');
+      const undoMsg   = document.getElementById('undoMsg');
+
+      function setMsg(el, text, cls) {
+        el.textContent = text;
+        el.className = cls || 'muted';
+      }
+
+      // Load lists on start
+      google.script.run.withSuccessHandler(lists => {
+        if (!lists || !lists.length) {
+          setMsg(listsMsg, 'No task lists found. Create one in Google Tasks.', 'err');
+          return;
+        }
+        lists.forEach(l => {
+          const opt = document.createElement('option');
+          opt.value = l.id; opt.textContent = l.title;
+          listSel.appendChild(opt);
+        });
+        setMsg(listsMsg, `Loaded ${lists.length} list(s).`, 'muted');
+      }).getTaskLists();
+
+      // Import
+      document.getElementById('btnImport').addEventListener('click', () => {
+        const csv = document.getElementById('csvImport').value || '';
+        if (!csv.trim()) { setMsg(importMsg, 'Paste CSV first.', 'err'); return; }
+        setMsg(importMsg, 'Importing…');
+        google.script.run.withSuccessHandler(res => {
+          setMsg(importMsg, `Created ${res.created} task(s).`, 'ok');
+        }).withFailureHandler(err => {
+          setMsg(importMsg, err?.message || 'Import failed.', 'err');
+        }).addTasksFromCsv(csv, listSel.value);
+      });
+
+      // Undo/Delete by CSV
+      document.getElementById('btnUndo').addEventListener('click', () => {
+        const csv = document.getElementById('csvUndo').value || '';
+        if (!csv.trim()) { setMsg(undoMsg, 'Paste CSV to delete.', 'err'); return; }
+        setMsg(undoMsg, 'Deleting…');
+        google.script.run.withSuccessHandler(res => {
+          const d = res.deleted || 0;
+          setMsg(undoMsg, `Deleted ${d} task(s).`, d > 0 ? 'ok' : 'muted');
+        }).withFailureHandler(err => {
+          setMsg(undoMsg, err?.message || 'Delete failed.', 'err');
+        }).deleteTasksFromCsv(csv, listSel.value);
+      });
+
+      // Show CSV format text (pulled from the project file contents baked below)
+      const FORMAT_TEXT = `# CSV Format for Google Tasks (Use With an LLM)
+REQUIRED COLUMNS (in order): title, notes, due
+- Header row is optional. If present, include: title,notes,due
+- Separator: comma
+- Quote fields containing commas with double-quotes
+
+FIELD RULES
+1) title (required)
+   - Non-empty string.
+   - Example: Pay rent
+
+2) notes (optional)
+   - Any text. Leave blank to omit.
+   - Example: Use the new portal
+
+3) due (optional)
+   - Either:
+     a) A date in YYYY-MM-DD (interpreted as midnight UTC), or
+     b) An RFC3339 timestamp (ISO-8601), e.g. 2025-08-22T15:30:00Z
+   - If omitted or blank, no due date is set.
+
+EXAMPLES
+# With header
+title,notes,due
+"Email Alex","Follow up on proposal",2025-09-01
+Buy milk,,2025-08-22
+"Schedule dentist","Call Dr. Smith",2025-08-25T14:00:00Z
+
+# Without header
+"Email Alex","Follow up on proposal",2025-09-01
+Buy milk,,2025-08-22
+"Schedule dentist","Call Dr. Smith",2025-08-25T14:00:00Z
+
+DELETE/UNDO BY CSV
+- To delete tasks, provide a CSV with the same columns.
+- Matching rules per row:
+  - title: must match exactly (trimmed).
+  - notes: if present and non-empty, must match exactly (trimmed). If blank, notes are ignored.
+  - due:
+     * YYYY-MM-DD → matches tasks with that date (date-only match).
+     * RFC3339 → must match exactly.
+     * Blank → due date ignored.
+- All matching tasks for each row are deleted.`;
+
+      document.getElementById('btnShowFormat').addEventListener('click', () => {
+        const det = document.getElementById('formatDetails');
+        const pre = document.getElementById('formatText');
+        pre.textContent = FORMAT_TEXT;
+        det.style.display = 'block';
+        det.open = true;
+      });
+    </script>
+  </body>
+</html>
